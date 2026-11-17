@@ -1,0 +1,296 @@
+diff --git a/src/app/app.component.ts b/src/app/app.component.ts
+index f8d9842..8ac374f 100644
+--- a/src/app/app.component.ts
++++ b/src/app/app.component.ts
+@@ -104,6 +104,7 @@ import {
+   whenAnimationsSettle,
+ } from './core/startup/boot-splash';
+ import { saveLaunchFrame } from './core/startup/launch-frame';
++import { getStartPagePrimaryColor } from './features/config/default-start-page.util';
+ 
+ interface BeforeInstallPromptEvent extends Event {
+   prompt(): Promise<void>;
+@@ -607,7 +608,15 @@ export class AppComponent implements OnDestroy, AfterViewInit {
+ 
+   private _saveLaunchFrame(): void {
+     if (this._document) {
+-      saveLaunchFrame(this._document, this._globalThemeService.isDarkTheme());
++      saveLaunchFrame(
++        this._document,
++        this._globalThemeService.isDarkTheme(),
++        getStartPagePrimaryColor(
++          this._globalConfigService.misc()?.defaultStartPage,
++          this._projectService.list(),
++          this._tagService.tags(),
++        ),
++      );
+     }
+   }
+ 
+diff --git a/src/app/core/startup/launch-frame.spec.ts b/src/app/core/startup/launch-frame.spec.ts
+index d65aab4..2e311b4 100644
+--- a/src/app/core/startup/launch-frame.spec.ts
++++ b/src/app/core/startup/launch-frame.spec.ts
+@@ -1,5 +1,11 @@
+ import { LS } from '../persistence/storage-keys.const';
+-import { LaunchFrames, readLaunchFrame, saveLaunchFrame } from './launch-frame';
++import {
++  isPlainColor,
++  LaunchFrames,
++  readableOn,
++  readLaunchFrame,
++  saveLaunchFrame,
++} from './launch-frame';
+ 
+ describe('launch-frame', () => {
+   let iframe: HTMLIFrameElement;
+@@ -111,4 +117,31 @@ describe('launch-frame', () => {
+     expect(() => saveLaunchFrame(doc, true)).not.toThrow();
+     expect(stored().dark?.bg).toBe('rgb(10, 20, 30)');
+   });
++
++  it('stores the start page accent with a readable text color', () => {
++    saveLaunchFrame(doc, true, '#6495ED');
++
++    expect(stored().dark?.accent).toBe('#6495ED');
++    expect(stored().dark?.accentFg).toBe('#131314');
++    expect(stored().dark?.bg).toBe('rgb(10, 20, 30)');
++  });
++
++  it('ignores an accent that is not a plain color', () => {
++    saveLaunchFrame(doc, true, 'red; background: url(x)');
++
++    expect(stored().dark?.accent).toBeUndefined();
++  });
++
++  it('picks text that reads on the accent', () => {
++    expect(readableOn('#1a237e')).toBe('#ffffff');
++    expect(readableOn('rgb(144, 187, 165)')).toBe('#131314');
++    expect(readableOn('#fff')).toBe('#131314');
++  });
++
++  it('accepts hex and rgb colors only', () => {
++    expect(isPlainColor('#abc')).toBe(true);
++    expect(isPlainColor('rgba(1, 2, 3, 0.5)')).toBe(true);
++    expect(isPlainColor('var(--x)')).toBe(false);
++    expect(isPlainColor(undefined)).toBe(false);
++  });
+ });
+diff --git a/src/app/core/startup/launch-frame.ts b/src/app/core/startup/launch-frame.ts
+index a5b04e7..14239c4 100644
+--- a/src/app/core/startup/launch-frame.ts
++++ b/src/app/core/startup/launch-frame.ts
+@@ -19,6 +19,14 @@ export interface LaunchFrame {
+   /** Bottom bar's distance from the viewport bottom to its top edge (incl. safe area). */
+   bottomBar: number | null;
+   isRtl: boolean;
++  /**
++   * Primary color of the default start page's work context (e.g. Today), so
++   * the launch screen opens in the page's own accent. Takes over from bg/fg/
++   * backdrop in index.html when set.
++   */
++  accent?: string;
++  /** Logo/tip color readable on `accent`. */
++  accentFg?: string;
+ }
+ 
+ export type LaunchFrames = Partial<Record<'dark' | 'light', LaunchFrame>>;
+@@ -57,13 +65,65 @@ export const readLaunchFrame = (doc: Document): LaunchFrame | null => {
+   };
+ };
+ 
++/** Parses #rgb, #rrggbb(aa) and rgb()/rgba() into [r, g, b] (0–255). */
++const parseRgb = (color: string): [number, number, number] | null => {
++  const c = color.trim();
++  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.exec(c);
++  if (hex) {
++    let h = hex[1];
++    if (h.length === 3) {
++      h = h
++        .split('')
++        .map((ch) => ch + ch)
++        .join('');
++    }
++    return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16)) as [
++      number,
++      number,
++      number,
++    ];
++  }
++  const rgb = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/i.exec(c);
++  return rgb ? [+rgb[1], +rgb[2], +rgb[3]] : null;
++};
++
++/**
++ * A color is only safe to hand to the inline script if it is a plain color:
++ * it ends up in a CSS custom property without further checks.
++ */
++export const isPlainColor = (color: unknown): color is string =>
++  typeof color === 'string' && parseRgb(color) !== null;
++
++/** Dark or light text, whichever reads better on `color` (WCAG luminance). */
++export const readableOn = (color: string): string => {
++  const rgb = parseRgb(color);
++  if (!rgb) {
++    return '#ffffff';
++  }
++  const [r, g, b] = rgb.map((v) => {
++    const s = v / 255;
++    return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
++  });
++  const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
++  // Contrast vs white is (1.05)/(L+0.05), vs near-black (#131314) ~ (L+0.05)/0.057.
++  return luminance > 0.18 ? '#131314' : '#ffffff';
++};
++
+ /** Stores the current frame for the next launch; never throws. */
+-export const saveLaunchFrame = (doc: Document, isDark: boolean): void => {
++export const saveLaunchFrame = (
++  doc: Document,
++  isDark: boolean,
++  accent?: string | null,
++): void => {
+   try {
+     const frame = readLaunchFrame(doc);
+     if (!frame) {
+       return;
+     }
++    if (isPlainColor(accent)) {
++      frame.accent = accent.trim();
++      frame.accentFg = readableOn(accent);
++    }
+     let frames: LaunchFrames = {};
+     try {
+       frames = JSON.parse(localStorage.getItem(LS.LAUNCH_FRAME) || '{}') ?? {};
+diff --git a/src/app/features/config/default-start-page.util.spec.ts b/src/app/features/config/default-start-page.util.spec.ts
+index 4fd5464..5900dcd 100644
+--- a/src/app/features/config/default-start-page.util.spec.ts
++++ b/src/app/features/config/default-start-page.util.spec.ts
+@@ -1,4 +1,4 @@
+-import { getStartPageUrlPath } from './default-start-page.util';
++import { getStartPagePrimaryColor, getStartPageUrlPath } from './default-start-page.util';
+ import { DefaultStartPage } from './default-start-page.const';
+ import { AppFeaturesConfig } from './global-config.model';
+ import { Project } from '../project/project.model';
+@@ -122,3 +122,56 @@ describe('getStartPageUrlPath', () => {
+     });
+   });
+ });
++
++describe('getStartPagePrimaryColor', () => {
++  const today = { id: TODAY_TAG.id, theme: { primary: '#ff00aa' } };
++  const work = {
++    id: 'WORK',
++    isArchived: false,
++    isHiddenFromMenu: false,
++    theme: { primary: 'rgb(1, 2, 3)' },
++  };
++  const inbox = {
++    id: INBOX_PROJECT.id,
++    isArchived: false,
++    isHiddenFromMenu: false,
++    theme: { primary: '#00ff00' },
++  };
++
++  it("uses Today's color for Today and when unset", () => {
++    expect(getStartPagePrimaryColor(DefaultStartPage.Today, [], [today])).toBe('#ff00aa');
++    expect(getStartPagePrimaryColor(undefined, [], [today])).toBe('#ff00aa');
++  });
++
++  it("uses the project's color for a project start page", () => {
++    expect(getStartPagePrimaryColor('WORK', [work], [today])).toBe('rgb(1, 2, 3)');
++  });
++
++  it('uses the Inbox color for the legacy Inbox value', () => {
++    expect(getStartPagePrimaryColor(DefaultStartPage.Inbox, [inbox], [today])).toBe(
++      '#00ff00',
++    );
++  });
++
++  it('falls back to Today for archived, hidden or missing projects', () => {
++    expect(
++      getStartPagePrimaryColor('WORK', [{ ...work, isArchived: true }], [today]),
++    ).toBe('#ff00aa');
++    expect(
++      getStartPagePrimaryColor('WORK', [{ ...work, isHiddenFromMenu: true }], [today]),
++    ).toBe('#ff00aa');
++    expect(getStartPagePrimaryColor('GONE', [], [today])).toBe('#ff00aa');
++  });
++
++  it("uses Today's color for Planner, Schedule and Boards", () => {
++    expect(getStartPagePrimaryColor(DefaultStartPage.Planner, [work], [today])).toBe(
++      '#ff00aa',
++    );
++  });
++
++  it('uses the built-in Today color before tags have loaded', () => {
++    expect(getStartPagePrimaryColor(DefaultStartPage.Today, [], [])).toBe(
++      TODAY_TAG.theme.primary!,
++    );
++  });
++});
+diff --git a/src/app/features/config/default-start-page.util.ts b/src/app/features/config/default-start-page.util.ts
+index da12216..32f1b8a 100644
+--- a/src/app/features/config/default-start-page.util.ts
++++ b/src/app/features/config/default-start-page.util.ts
+@@ -3,6 +3,7 @@ import { DefaultStartPage } from './default-start-page.const';
+ import { Project } from '../project/project.model';
+ import { TODAY_TAG } from '../tag/tag.const';
+ import { INBOX_PROJECT } from '../project/project.const';
++import { Tag } from '../tag/tag.model';
+ 
+ /**
+  * Resolve the configured default start page to a route path.
+@@ -46,3 +47,34 @@ export const getStartPageUrlPath = (
+       return todayUrl;
+   }
+ };
++
++/**
++ * Primary (accent) color of the work context the app opens on, for the launch
++ * screen. Mirrors `getStartPageUrlPath`: a missing, archived or hidden project
++ * falls back to Today. Planner, Schedule and Boards have no context color of
++ * their own, so they use Today's too.
++ */
++export const getStartPagePrimaryColor = (
++  defaultStartPage: number | string | undefined,
++  projects: readonly Pick<Project, 'id' | 'isArchived' | 'isHiddenFromMenu' | 'theme'>[],
++  tags: readonly Pick<Tag, 'id' | 'theme'>[],
++): string | null => {
++  const todayColor =
++    tags.find((t) => t.id === TODAY_TAG.id)?.theme?.primary ??
++    TODAY_TAG.theme.primary ??
++    null;
++
++  const projectId =
++    typeof defaultStartPage === 'string' && defaultStartPage.length > 0
++      ? defaultStartPage
++      : defaultStartPage === DefaultStartPage.Inbox
++        ? INBOX_PROJECT.id
++        : null;
++  if (projectId) {
++    const project = projects.find((p) => p.id === projectId);
++    return project && !project.isArchived && !project.isHiddenFromMenu
++      ? (project.theme?.primary ?? todayColor)
++      : todayColor;
++  }
++  return todayColor;
++};
+diff --git a/src/index.html b/src/index.html
+index 2a47d6a..47693bb 100644
+--- a/src/index.html
++++ b/src/index.html
+@@ -157,9 +157,10 @@
+             isDark ? 'dark' : 'light'
+           ];
+           if (frame) {
+-            root.style.setProperty('--sp-bg', frame.bg);
+-            root.style.setProperty('--sp-fg', frame.fg);
+-            if (frame.backdrop) {
++            // Start page accent (launch-frame.ts) wins over the theme's bg.
++            root.style.setProperty('--sp-bg', frame.accent || frame.bg);
++            root.style.setProperty('--sp-fg', frame.accent ? frame.accentFg : frame.fg);
++            if (frame.backdrop && !frame.accent) {
+               root.style.setProperty('--sp-backdrop', frame.backdrop);
+             }
+             if (frame.bottomBar) {
