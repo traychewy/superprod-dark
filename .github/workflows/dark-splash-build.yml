@@ -107,7 +107,15 @@ jobs:
           grep -q "name=\"windowBackground\">${DARK_COLOR}<" "$f" \
             || { echo "::error::patch did not apply - upstream changed colors.xml"; exit 1; }
           grep -n 'name="windowBackground"' "$f"
+          
+      - name: Get my patch files
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          path: my-patches
 
+      - name: Apply splash start-page colour patch
+        run: git apply my-patches/splash-start-page-accent.patch
+        
       - name: Install npm packages
         run: npm i
 
