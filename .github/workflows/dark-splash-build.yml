@@ -115,7 +115,18 @@ jobs:
 
       - name: Apply splash start-page colour patch
         run: git apply my-patches/splash-start-page-accent.patch
-        
+
+      - name: Give my build its own package name
+        run: |
+          set -euo pipefail
+          new="com.superproductivity.superproductivity.dark"
+          g=android/app/build.gradle
+          sed -i -E "s|applicationId \"com\.superproductivity\.superproductivity\"|applicationId \"${new}\"|" "$g"
+          grep -q "applicationId \"${new}\"" "$g" || { echo "::error::applicationId not changed"; exit 1; }
+          x=android/app/src/main/res/xml
+          sed -i "s|android:targetPackage=\"com.superproductivity.superproductivity\"|android:targetPackage=\"${new}\"|" "$x/shortcuts.xml"
+          sed -i "s|com.superproductivity.superproductivity_preferences.xml|${new}_preferences.xml|" "$x/backup_rules.xml" "$x/data_extraction_rules.xml"
+          
       - name: Install npm packages
         run: npm i
 
